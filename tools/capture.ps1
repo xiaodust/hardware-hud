@@ -1,5 +1,5 @@
-# 截取当前屏幕，用于视觉自评
-param([string]$Out = "F:\agent study\hardware-hud\dist\shot.png")
+﻿# 截取当前屏幕，用于视觉自评
+param([string]$Out = (Join-Path $PSScriptRoot "shot.png"))
 
 Add-Type -AssemblyName System.Drawing
 

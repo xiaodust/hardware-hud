@@ -2,7 +2,7 @@
 
 一个常驻桌面的极小硬件仪表盘：CPU / GPU / 内存的使用率与历史曲线，外加 GPU 温度、功耗、频率、风扇，以及磁盘与网络的实时吞吐。
 
-纯 **.NET Framework 4.0+ + WPF**（本机实测 4.8），无任何第三方依赖、无需安装、单文件 exe（约 88 KB）。
+纯 **.NET Framework 4.0+ + WPF**（开发与测试在 4.8 上进行），无任何第三方依赖、无需安装、单文件 exe（约 93 KB）。
 
 可运行在 **Windows 7 SP1 / 8.1 / 10 / 11**：只用了 .NET Framework 4.0 就存在的 API，没有碰 `VisualTreeHelper.GetDpi`（4.6.2+）、`RuntimeInformation`（4.7.1+）、`AppContext`、`Task.Delay` 这类新 API；所有 P/Invoke 都按「缺 DLL 就退下一级」处理。
 
@@ -18,22 +18,21 @@
 
 ## 快速开始
 
-桌面已有快捷方式 **`硬件监测`**，双击即可。它指向的是安装目录：
+程序是**绿色单文件**，没有安装包、不写注册表服务、不需要管理员权限。
 
-```
-%LOCALAPPDATA%\Programs\HardwareHud\HardwareHud.exe
-```
+1. 拿到 `HardwareHud.exe`：自己构建（见[从源码构建](#从源码构建)），或从 Releases 页面下载（如果发布了自己的构建）。
+2. 把它放到一个固定目录，推荐 `%LOCALAPPDATA%\Programs\HardwareHud\`：
 
-即 `C:\Users\<你>\AppData\Local\Programs\HardwareHud\`，不需要管理员权限，卸载时删掉这个目录和桌面快捷方式即可。
+   ```
+   %LOCALAPPDATA%\Programs\HardwareHud\HardwareHud.exe
+   ```
 
-> **不要直接运行 `F:\agent study\hardware-hud\dist\HardwareHud.exe`。**
-> 这台机器上，从工作区路径（`F:\agent study\...`）启动的进程会被拦掉三件事：通知区域图标注册失败（`tray=fail(size=976,err=0)`），`%APPDATA%` 不可写（配置只能退化存到 exe 旁边），连「桌面快捷方式 / 开机自启动 `.lnk`」也会失败（`UnauthorizedAccessException：无法保存快捷方式`，WScript.Shell 的 `Save` 被拒）。同一个 exe 放到 C 盘任何位置都正常（`tray=ok`，配置写 `%APPDATA%\HardwareHud\`，快捷方式正常）。`dist\` 只是构建产物，`build.bat` 编完会自动覆盖到安装目录。
+3. 双击运行。首次启动后，右键菜单里点一次 **桌面快捷方式**（建 `硬件监测.lnk`）和 **开机自启动**（建启动项），之后就可以从桌面或开机直接用了。
 
-也可以直接运行安装目录里的 exe：
+**卸载**：右键菜单 → 退出；先在菜单里取消「开机自启动」，再删掉上面那个目录和桌面快捷方式即可，没有残留。
 
-```
-"%LOCALAPPDATA%\Programs\HardwareHud\HardwareHud.exe"
-```
+> **为什么不建议直接从 `dist\` 里运行？**
+> `dist\HardwareHud.exe` 只是构建产物。从某些位置（例如网络驱动器、映射盘、受控的工作区目录）启动的进程会被系统限制：通知区域图标注册失败、`%APPDATA%` 不可写（配置只能退化存到 exe 旁边）、连「桌面快捷方式 / 开机自启动 `.lnk`」的 `Save` 也可能被拒（`UnauthorizedAccessException`）。同一个 exe 放到 `%LOCALAPPDATA%` 下就一切正常。`build.bat` 编完会自动把新版本覆盖到安装目录，所以日常用安装目录那份就好。
 
 窗口默认出现在屏幕右上角，**左键拖动可移动**，**右键打开菜单**，同时也出现在**任务栏**和**通知区域**。
 
@@ -84,7 +83,7 @@
 
 程序自己也会做一步：图标第一次注册成功后，Windows 会立刻在 `HKCU\Control Panel\NotifyIconSettings` 下为它建一条记录，程序随即把这条记录标成 `IsPromoted=1`，于是图标直接出现在任务栏上（通常当场生效，最迟下次启动）。你如果手动改成了「隐藏」，程序就不会再覆盖你的选择。
 
-Explorer 重启（崩溃、切换显示设置等）会清空托盘，程序收到系统的 `TaskbarCreated` 广播后会自动把图标加回去；登录早期托盘尚未就绪时，会每 2 秒重试，最多 20 次（约 40 秒）—— 开机自启时 Explorer 常常比程序晚十几秒才起来，8 次是不够的。
+Explorer 重启（崩溃、切换显示设置等）会清空托盘，程序收到系统的 `TaskbarCreated` 广播后会自动把图标加回去；登录早期托盘尚未就绪时，会每 2 秒重试，最多 20 次（约 40 秒）—— 开机自启时 Explorer 常常比程序晚十几秒才起来，8 次远远不够。
 
 托盘图标即使注册失败（某些受限桌面会拒绝 `Shell_NotifyIcon`），任务栏、系统菜单和热键这三条路依然有效；此时菜单里会多出一行「重新添加托盘图标」，点它能看到具体的失败原因。
 
@@ -93,21 +92,21 @@ Explorer 重启（崩溃、切换显示设置等）会清空托盘，程序收�
 ## 界面
 
 ```
-┌────────────────────────────────────────┐
-│ HARDWARE·HUD            i5-12600KF     │   ← 标题 + CPU 型号
-│ ────────────────────────────────────── │
-│ 处理器              ▃▅▂▇▃▅ 46 %        │   ← 大数字 + 112 点历史曲线
-│ 10 核 16 线程                          │   ← 补充信息行
-│                                        │
-│ 显卡                ▁▂▃▂▅▃▂▁ 24 %        │   ← 标签后面就是显卡型号
-│ 1.7 / 8.0 GB  37°C  功耗 N/A  465 MHz   │
-│                                        │
-│ 内存                ▇▇▇▇▇▇▇▇ 81 %        │
-│ 12.8 / 15.8 GB                         │
-│ ────────────────────────────────────── │
-│ 磁盘 ↓ 2.1 MB/s       网络 ↓ 8.4 KB/s   │
-│ 磁盘 ↑ 0.3 MB/s       网络 ↑ 1.2 KB/s   │
-└────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│ i5-12600KF                      已运行 10:42 │  ← CPU 型号（已精简）+ 运行时间
+│ ──────────────────────────────────────────── │
+│ 处理器                      ▃▅▂▇▃▅      46 % │  ← 大数字 + 112 点历史曲线
+│ 4.31 GHz    10 核 16 线程                    │  ← 补充信息行
+│                                              │
+│ 显卡 NVIDIA GeForce RTX 4060     ▁▂▃▂▅  24 % │  ← 标签后面直接跟型号
+│ 1.7 / 8.0 GB    37°C    功耗 N/A    465 MHz  │
+│                                              │
+│ 内存                      ▇▇▇▇▇▇▇▇      81 % │
+│ 12.8 / 15.8 GB    已提交 20.4 GB             │
+│ ──────────────────────────────────────────── │
+│ 磁盘 读 2.1 MB/s             网络 ↓ 8.4 KB/s │
+│      写 0.3 MB/s                  ↑ 1.2 KB/s │
+└──────────────────────────────────────────────┘
 ```
 
 - 每行一条 112 点的滑动历史（500 ms 采样 → 约 56 秒窗口）。
@@ -120,16 +119,15 @@ Explorer 重启（崩溃、切换显示设置等）会清空托盘，程序收�
 
 ## 极简模式
 
-右键菜单 → **极简模式**（或双击托盘图标、或按 `Ctrl+Alt+H`）。打开后整个面板（底色、边框、投影、网格、曲线、标题与页脚）全部消失，
-右上角只剩三行文字，窗口从 400×397 缩到 **164×75**：
+右键菜单 → **极简模式**（或双击托盘图标、或按 `Ctrl+Alt+H`）。打开后整个面板（底色、边框、投影、网格、曲线、标题与页脚）全部消失，只剩三行文字，窗口从 400×397 缩到 **164×75**：
 
 ```
-CPU            28%
-GPU   24%  47°
-RAM            83%
+CPU            15%
+GPU   38%  38°
+RAM            74%
 ```
 
-- 每行只有「指标名 + 数值」，GPU 行在能读到温度时再跟一个 `47°`。
+- 每行只有「指标名 + 数值」，GPU 行在能读到温度时再跟一个 `38°`。
 - 文字带 **1px 八方向深色描边**，压在白色或花哨壁纸上也读得清，不依赖任何底图。
 - 数值 ≥ 90% 时数字转为警示红 `#E6624F`（和面板模式同一套规则）。
 - 依然可以左键拖动、右键打开菜单；切换时以右边缘为锚，不会从右上角跳走。
@@ -154,7 +152,8 @@ RAM            83%
 | GPU 型号 | **DXGI** `CreateDXGIFactory1` + `IDXGIFactory1.EnumAdapters1`（不限厂商；同一块卡被多个虚拟显示器枚举成多条时按「型号 + 厂商 + 显存」去重，虚拟显示适配器与 `Microsoft Basic Render Driver` 会被过滤掉） |
 | GPU 利用率 / 显存占用 | 优先 **NVML** `nvmlDeviceGetUtilizationRates` / `nvmlDeviceGetMemoryInfo`；拿不到时（A 卡、核显、驱动没装）退 PDH `\GPU Engine(*)\Utilization Percentage` 与 `\GPU Adapter Memory(*)\Dedicated Usage` |
 | GPU 温度·功耗·风扇·频率 | **NVML 直连** `nvml.dll`（仅 NVIDIA；这几项 PDH 拿不到） |
-| 磁盘吞吐 | PDH `\PhysicalDisk(_Total)\Disk Read Bytes/sec` / `Disk Write Bytes/sec` || 网络吞吐 | PDH `\Network Interface(*)\Bytes Received/sec` / `Bytes Sent/sec`（通配枚举所有实例后过滤 isatap / Teredo / Loopback / Pseudo） |
+| 磁盘吞吐 | PDH `\PhysicalDisk(_Total)\Disk Read Bytes/sec` / `Disk Write Bytes/sec` |
+| 网络吞吐 | PDH `\Network Interface(*)\Bytes Received/sec` / `Bytes Sent/sec`（通配枚举所有实例后过滤 isatap / Teredo / Loopback / Pseudo） |
 
 **关于 PDH（性能数据助手）英文计数器**：老做法用 `System.Diagnostics.PerformanceCounter`，它必须用「系统显示语言」下的计数器名（中文系统是 `物理磁盘`，德文系统又是另一套），在非英文 Windows 上很容易直接抛 `InvalidOperationException`，而且原来这四项挂在同一个 `try` 里 —— 一项失败，磁盘、网络、已提交内存、CPU 频率全部变成 `N/A`。现在统一走 `PdhAddEnglishCounterW`：名字永远是英文，任何语言的 Windows 都能解析；所有计数器挂在同一个查询上，一次 `PdhCollectQueryData` 刷新全部；网络实例名用 `(*)` 通配枚举，不再依赖本地化的类别名。PDH 完全不可用的系统（极少数精简掉 PDH 的机器）只是这几项显示 `N/A`，CPU / GPU / 内存照常。
 
@@ -166,8 +165,8 @@ RAM            83%
 
 **任何一项指标拿不到都不会让程序出错**，只会以 `N/A` / 空白显示：
 
-- RTX 4060 笔记本 / 桌面版的 `nvmlDeviceGetPowerUsage` 在本机返回 `rc=3`（不支持），功耗位显示 `功耗 N/A`，其余指标照常。
-- 没有 NVIDIA 显卡时，显卡行显示「未检测到 NVIDIA 驱动」（有 DXGI 可用时型号照常显示），CPU 与内存仍正常工作。
+- RTX 4060（桌面与笔记本版均实测）的 `nvmlDeviceGetPowerUsage` 在部分驱动 / 型号上返回 `rc=3`（不支持），功耗位显示 `功耗 N/A`，其余指标照常。
+- 没有 NVIDIA 显卡时：有 DXGI 可用就照常显示型号与（Win10 1709+ 的）利用率 / 显存，说明行写「实时指标需 NVIDIA 驱动」；连 DXGI 都枚举不到卡时才写「未检测到显卡」。CPU 与内存不受影响。
 - 没有 CPU 温度传感器（`MSAcpi_ThermalZoneTemperature` 返回 0 个实例的机器）时，不显示 CPU 温度。
 
 ---
@@ -199,10 +198,11 @@ RAM            83%
 无需 Visual Studio、无需 .NET SDK，只用 Windows 自带的 .NET Framework 编译器：
 
 ```
-build.bat
+build.bat           只编译
+build.bat deploy    编译 + 覆盖安装目录
 ```
 
-输出 `dist\HardwareHud.exe`。脚本内部就是一行 `csc.exe`：
+输出 `dist\HardwareHud.exe`。脚本核心就是一条 `csc.exe` 命令：
 
 ```
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
@@ -214,9 +214,11 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
   src\HardwareHud.cs
 ```
 
-唯一的源文件是 `src\HardwareHud.cs`（约 3100 行，C# 5 语法，因为自带的 csc 只支持到 C# 5）。
+**前置要求**：Windows 上装有 .NET Framework 4.x（Win10 1803 起系统自带 4.7+，Win7 需自行安装）。编译器和 WPF 程序集都在 `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\` 下，不需要 Visual Studio，也不需要 Windows SDK。脚本会自动检测：32 位系统上没有 `Framework64` 就退到 `Framework`。
 
-> 重新编译前请先退出正在运行的实例，否则 `csc` 会因为文件被占用而报 `CS0016`。
+`build.bat deploy` 在编译后把新版本覆盖到安装目录（会先结束正在运行的实例；安装目录不存在时自动跳过），日常开发用这一条就行。编译前请退出从 `dist\` 启动的实例，否则 `csc` 会因为输出文件被占用而报 `CS0016`。
+
+唯一的源文件是 `src\HardwareHud.cs`（约 3600 行，C# 5 语法，因为自带的 csc 只支持到 C# 5）。
 
 ---
 
@@ -234,17 +236,12 @@ HardwareHud.exe --snapshot out.png --scale 2 --wait 5000
 | `--scale <n>` | 渲染倍率（默认 2） |
 | `--wait <ms>` | 采样多久后再截图（默认 2500；设为 60000 可拿到满历史） |
 | `--geometry <txt>` | 额外输出窗口 / 画布的实际几何，以及 `tray=` / `hotkey=` / `sysmenu=` / `taskbar=` / `pdh=` / `gpu=` / `tip=` 这些注册与采集状态 |
-| `--shortcut` | 在桌面创建 / 修复快捷方式后退出，结果写入 exe 同目录的 `shortcut-result.txt`（注意：exe 放在 `F:\` 工作区时这一步一定会失败，见上面的警告） |
+| `--shortcut` | 在桌面创建 / 修复快捷方式后退出，结果写入 exe 同目录的 `shortcut-result.txt`（在受限位置运行时可能失败，属系统限制而非程序问题） |
 | `--minimal` | 本次进程强制以极简模式启动（不写回配置） |
 | `--toggle` | 启动后再切换一次模式，用来验证两种模式之间的互相切换 |
-| `--nogpu` | 强制关掉 NVML，模拟「这台机器没有 NVIDIA 卡」，用来验证 DXGI 型号 + PDH GPU 计数器的兜底路径 |
+| `--nogpu` | 强制关掉 NVML，模拟「没有 NVIDIA 卡的机器」，用来验证 DXGI 型号 + PDH GPU 计数器的兜底路径 |
 
-同时会在 PNG 旁边写出 `out.png.layout.txt`：逐行的 label / 数字 / 单位 / 曲线窗口 / 说明行的精确包围盒，外加自动检查的 **文字是否重叠、是否越界、是否溢出可用宽度、序列点数与极值**。所有检查项应全部为 `no` / `ok`。
-
-```
-$ .\dist\HardwareHud.exe --snapshot shot.png --wait 60000
-$ .\.build\CurveCheck.exe shot.png 34 154 628 64   # 验曲线：40 列每列取值 + 有无曲线
-```
+同时会在 PNG 旁边写出 `out.png.layout.txt`：逐行的 label / 数字 / 单位 / 曲线窗口 / 说明行的精确包围盒，外加自动检查的 **文字是否重叠、是否越界、是否溢出可用宽度、序列点数与极值**。所有检查项应全部为 `no` / `ok` —— 这是没有肉眼比对时发现排版回归的唯一可靠手段。
 
 ---
 
@@ -252,25 +249,20 @@ $ .\.build\CurveCheck.exe shot.png 34 154 628 64   # 验曲线：40 列每列取
 
 ```
 hardware-hud/
-├─ src/HardwareHud.cs      唯一源文件（采集 / 视觉 / 窗口 / 菜单 / 托盘）
-├─ assets/HardwareHud.ico  多尺寸图标（16…256，构建时嵌入 exe）
-├─ build.bat               一行 csc 构建脚本（ASCII + CRLF）
-├─ dist/HardwareHud.exe    产物
-├─ tools/capture.ps1       整屏截图（早期手工核对用）
-└─ .build/                 开发期像素分析工具（csc 独立编译，可整目录删除）
-   ├─ CurveCheck.exe       曲线可见性 / 高度校验
-   ├─ Blues.exe            低饱和（内存）曲线校验
-   ├─ Grab.exe             按窗口句柄抓屏
-   ├─ MkIcon.exe           生成多尺寸 ICO
-   ├─ PixProbe.exe         采样列饱和度
-   ├─ ColDump.exe          单列逐像素 RGB
-   ├─ CellAudit.exe        分格统计彩色像素
-   ├─ CoreProbe.exe        枚举 GetLogicalProcessorInformationEx
-   ├─ Fx.exe / Fx2.exe     WPF 绘制原语的隔离对照组
-   └─ Ascii / Ink / Bands / Pix / Audit / WellDump   早期 ASCII 降采样工具
+├─ src/HardwareHud.cs        唯一源文件（采集 / 视觉 / 窗口 / 菜单 / 托盘）
+├─ assets/HardwareHud.ico    多尺寸图标（16…256，构建时嵌入 exe）
+├─ build.bat                 构建脚本：`build.bat` 只编译，`build.bat deploy` 编译并部署
+├─ LICENSE                   MIT
+├─ docs/                     README 用的截图：面板 400×397、极简 164×75、托盘图标 364×72
+├─ tools/
+│  ├─ capture.ps1            整屏截图（早期手工核对用）
+│  └─ probes/                能力探测脚本（PDH 计数器、NVML、GPU 引擎计数器），见其中的 README
+└─ dist/                     构建产物，不入库（gitignored）
 ```
 
-安装方式：把桌面快捷方式 `硬件监测` 指向 `dist\HardwareHud.exe` 即可（图标已嵌入 exe，快捷方式直接用 `,0`）。
+`.build/` 里是一批开发期用的像素分析小工具（csc 独立编译、可整个删掉），**不随仓库分发**，仓库里看不到它们；上面的自检路径（`--snapshot` + `--geometry`）不依赖这些工具。
+
+安装：把快捷方式 `硬件监测` 指向**安装目录**里的 `HardwareHud.exe`（图标已嵌入 exe，快捷方式用 `,0`），或直接用菜单里的「桌面快捷方式」自动创建 —— 细节见[快速开始](#快速开始)。
 
 ---
 
@@ -284,3 +276,56 @@ hardware-hud/
 - 显卡功耗位在部分型号上显示 `功耗 N/A`：NVML 对该卡返回「不支持」，不是读取失败，其余指标正常。
 - 通知区域图标需要系统托盘可用；被组策略或受限桌面拒绝时会静默跳过（其余入口不受影响）。
 - `--snapshot` 等开关属于开发设施，保留在发布版本里但不影响正常使用。
+
+---
+
+## 常见问题
+
+**双击 exe 没反应，也没有窗口？**
+大概率是已经有一个实例在跑（单实例运行）。再双击一次会把已在运行的窗口叫到最前面并弹出菜单。想看它到底在干什么，用菜单 →「诊断信息」，或看日志。
+
+**托盘里找不到图标？**
+Windows 11 默认把新图标收进 `^` 折叠区，去「设置 → 个性化 → 任务栏 → 其他系统托盘图标」里打开即可。如果 `^` 里也没有，说明托盘注册被系统拒绝了（受限桌面 / 组策略），此时任务栏按钮、`Alt+Space` 系统菜单、`Ctrl+Alt+H` 热键三条入口仍然有效。
+
+**A 卡 / 核显能显示吗？**
+能显示型号（DXGI，任何厂商都读得到）和利用率 / 显存占用（PDH GPU 计数器，Win10 1709+）。温度、功耗、风扇、频率这四项没有通用接口，只有 NVIDIA 卡经 NVML 才有，其余卡留空。
+
+**功耗为什么显示 `N/A`？**
+NVML 对这张卡返回 `NVML_ERROR_NOT_SUPPORTED`（部分 RTX 40 系、笔记本卡如此），不是读取失败，其余指标不受影响。
+
+**Windows 7 上打不开？**
+Win7 自带只有 .NET Framework 3.5，需要自己装 4.x（4.0 即可）。装上后功能和 Win10/11 一致。
+
+**数据准确吗？和任务管理器对不上？**
+采样口径不同：本程序按 500 ms 轮询一次取瞬时值，任务管理器是它自己的一套聚合窗口，两者有细微偏差属正常。磁盘吞吐来自 `PhysicalDisk(_Total)`（含所有物理盘），网络吞吐按所有非虚拟网卡求和。
+
+**能不能改采样间隔 / 曲线长度 / 换配色？**
+目前不开放配置，这三项写死在源码里（`Sampler` 的 500 ms、`History` 的 112 点、`Look` 里的颜色常量）。想改就改源码重建，`build.bat` 一条命令搞定。
+
+**会不会上传数据、连网？**
+不会。程序没有任何网络请求，不收集遥测。唯一的外部交互是读本机性能计数器、DXGI/NVML 和注册表。
+
+---
+
+## 免责声明
+
+这是一个个人做的桌面小工具，**按「现状」提供**，不保证在任何特定机器上的数值绝对准确，也不对因使用它导致的任何后果负责。硬件读数来自操作系统提供的接口（PDH / DXGI / NVML），程序只做聚合与显示，不修改系统状态、不超频、不改任何硬件设置。
+
+如果你的机器上出现了异常行为（崩溃、数值离谱、占满 CPU），请附上 `HardwareHud.log` 开 issue。
+
+---
+
+## 许可证
+
+本项目以 **MIT License** 发布，详见 [LICENSE](LICENSE)。你可以自由使用、修改、分发，包括商用，保留版权声明即可。
+
+---
+
+## 贡献
+
+欢迎提 issue 和 PR。改动源码前请注意：
+
+- 编译器是 **Windows 自带的 csc（C# 5）**：不能用字符串插值 `$"..."`、`?.`、`nameof`、元组、表达式体成员等 C# 6+ 的语法（`async/await` 属于 C# 5，可以用）；本地验证跑一次 `build.bat` 即可（无需 SDK）。
+- 只能依赖 .NET Framework 4.0 已存在的 API —— 不要引入 `VisualTreeHelper.GetDpi`（4.6.2+）、`RuntimeInformation`（4.7.1+）、`AppContext`、`Task.Delay` 等工作在 Win7 + 4.0 上不存在的成员。
+- 所有 P/Invoke 都要能「缺 DLL / 缺功能就退下一级」，并且失败路径只是让某项指标变成 `N/A`，不能让程序崩。
+- 改排版后，请附上 `--snapshot` + `--geometry` 生成的 `.layout.txt`，确认检查项全为 `no` / `ok`。
