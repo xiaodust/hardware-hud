@@ -957,9 +957,14 @@ namespace HardwareHud
         bool _gpuPdhOpen;
         bool _gpuPdhFailed;
         volatile bool _pdhOpen;
-        int _pdhNextTry;
+        // 初值必须让第一轮立刻尝试打开：Environment.TickCount 在开机超过 24.8 天后是负数，
+        // 初值 0 会让 unchecked(TickCount - 0) >= 0 恒为假 —— 磁盘 / 网络 / 已提交 / CPU 频率
+        // 将永远停在 "--"（这台 27 天未重启的机器上实测复现）
+        int _pdhNextTry = unchecked(Environment.TickCount - 1);
         int _pdhFails;
-        string _pdhStatus = "off";
+        // 初值是 "off"、且 _pdhNextTry = 0 时，采样线程第一轮就会开门——但 DiagnosePage 之类
+        // 早于第一帧读到的还是 "off"。这里显式给一个初值，避免日志里出现误导性的 pdh=off
+        string _pdhStatus = "pending";
         int _gate = 6;
 
         public string CpuModel = "CPU";
