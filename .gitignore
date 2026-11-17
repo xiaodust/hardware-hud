@@ -1,0 +1,13 @@
+# 构建产物
+dist/
+.build/
+*.exe
+*.log
+
+# 运行时数据（配置、托盘/窗口状态）
+HardwareHud/
+settings.ini
+
+# 开发期截图与布局自检输出（docs/ 里的示例图除外）
+/*.png
+*.layout.txt
