@@ -133,6 +133,20 @@ namespace HardwareHud
             catch { }
         }
 
+        // 反方向：只在托盘里留图标，任务栏和 Alt+Tab 都不出现。
+        // 同样要手动打 TOOLWINDOW 并摘掉 APPWINDOW —— WPF 的 ShowInTaskbar=false
+        // 在无边框窗口上会被随后的样式重设覆盖掉。
+        public static void ForceToolWindow(IntPtr hwnd)
+        {
+            try
+            {
+                int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+                ex = (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW;
+                SetWindowLong(hwnd, GWL_EXSTYLE, ex);
+            }
+            catch { }
+        }
+
         // ── 通知区域（托盘）图标 ──
         public const uint NIM_ADD = 0;
         public const uint NIM_MODIFY = 1;
@@ -1350,6 +1364,7 @@ namespace HardwareHud
         public int Y = -999999;
         public bool Autostart;
         public bool Minimal;                    // 极简模式：只显示文字，不画面板和曲线
+        public bool ShowInTaskbar;              // 任务栏按钮；默认关，只留托盘图标
 
         // 配置目录：优先 %APPDATA%，不可写时依次退到 %LOCALAPPDATA%、exe 同目录。
         // 某些受管/受限用户配置下 ApplicationData 是不可写的，不能让设置整体失效。
@@ -1443,6 +1458,7 @@ namespace HardwareHud
                             if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n)) s.Y = n;
                         }
                         else if (k == "minimal") s.Minimal = v == "1";
+                        else if (k == "taskbar") s.ShowInTaskbar = v == "1";
                     }
                 }
             }
@@ -1460,7 +1476,8 @@ namespace HardwareHud
                 "opacity=" + OpacityLevel.ToString("0.0", CultureInfo.InvariantCulture),
                 "x=" + X.ToString(CultureInfo.InvariantCulture),
                 "y=" + Y.ToString(CultureInfo.InvariantCulture),
-                "minimal=" + (Minimal ? "1" : "0")
+                "minimal=" + (Minimal ? "1" : "0"),
+                "taskbar=" + (ShowInTaskbar ? "1" : "0")
             };
             if (TryWrite(FilePath, lines)) return;
 
@@ -2380,6 +2397,7 @@ namespace HardwareHud
         int _trayTries;
         EventWaitHandle _wake;
         bool _startLogged;
+        bool _taskbarFallback;   // 本次运行因托盘失败临时打开任务栏按钮
 
         // 第二个实例启动时用它叫醒已经在跑的那个
         public const string WakeEventName = @"Local\HardwareHud.Wake";
@@ -2395,7 +2413,7 @@ namespace HardwareHud
             ResizeMode = ResizeMode.NoResize;
             AllowsTransparency = true;
             Background = Brushes.Transparent;
-            ShowInTaskbar = true;
+            ShowInTaskbar = settings.ShowInTaskbar;
             ShowActivated = false;
             Topmost = settings.Topmost;
             Opacity = settings.OpacityLevel;
@@ -2701,11 +2719,20 @@ namespace HardwareHud
             catch { }
         }
 
+        // 任务栏按钮的实际状态：用户的选择，或本次运行因托盘失败被强制打开
+        bool TaskbarVisible
+        {
+            get { return _settings.ShowInTaskbar || _taskbarFallback; }
+        }
+
         // 任务栏按钮 + 系统菜单：无边框全透明窗口这两样都得手动补
         void RefreshChrome()
         {
             if (_hwnd == IntPtr.Zero) return;
-            Native.ForceAppWindow(_hwnd);
+            // 只在托盘里显示时，必须主动打成 TOOLWINDOW，否则 WPF 后续的样式重设
+            // 会把窗口重新加回任务栏与 Alt+Tab
+            if (TaskbarVisible) Native.ForceAppWindow(_hwnd);
+            else Native.ForceToolWindow(_hwnd);
             Native.EnsureSystemMenu(_hwnd);
             BuildSystemMenu();
         }
@@ -2791,12 +2818,26 @@ namespace HardwareHud
                 if (_trayAdded || _trayTries >= 20)
                 {
                     _trayRetry.Stop();
+                    _trayRetry = null;          // 允许 Explorer 重启后重新开始一轮重试
+                    if (!_trayAdded) FallBackToTaskbar("托盘图标 20 次重试均失败");
                     return;
                 }
                 _trayTries++;
                 AddTrayIcon();
             };
             _trayRetry.Start();
+        }
+
+        // 托盘彻底加不上（受限桌面、组策略、Explorer 异常）：把任务栏按钮打开。
+        // 否则关了任务栏之后，用户除了 Ctrl+Alt+H 就再没有能点到窗口的入口。
+        // 这是本次运行的兜底，不写进设置 —— 下次启动仍按用户的选择只留托盘。
+        void FallBackToTaskbar(string why)
+        {
+            if (TaskbarVisible) return;
+            _taskbarFallback = true;
+            try { ShowInTaskbar = true; } catch { }
+            RefreshChrome();
+            LogLine("taskbar=on (fallback: " + why + ")");
         }
 
         Native.NOTIFYICONDATA NewTrayData()
@@ -2916,7 +2957,7 @@ namespace HardwareHud
             if (msg == WM_SYSCOMMAND)
             {
                 int cmd = wParam.ToInt32() & 0xFFF0;
-                if (cmd >= MENU_BASE && cmd <= MENU_BASE + 5 * MENU_STEP)
+                if (cmd >= MENU_BASE && cmd <= MENU_BASE + 6 * MENU_STEP)
                 {
                     if (RunMenuCommand((cmd - MENU_BASE) / MENU_STEP))
                     {
@@ -3038,6 +3079,7 @@ namespace HardwareHud
             AddMenuRow(stack, "开机自启动", _settings.Autostart, ActAutostart);
             AddMenuRow(stack, "回到右上角", false, ActResetPosition);
             AddMenuRow(stack, "极简模式", _canvas.Minimal, ActMinimal);
+            AddMenuRow(stack, "在任务栏显示", TaskbarVisible, ActTaskbar);
             // 托盘图标没加上时，多给一行手动补救的入口（正常情况不显示，避免菜单变长）
             if (!_trayAdded) AddMenuRow(stack, "重新添加托盘图标", false, ActRetryTray);
             AddMenuRow(stack, "桌面快捷方式", false, ActShortcut);
@@ -3107,6 +3149,24 @@ namespace HardwareHud
             ToggleMinimal();
         }
 
+        // 任务栏按钮开关：关掉后窗口只在通知区域留图标，任务栏和 Alt+Tab 都不出现
+        void ActTaskbar()
+        {
+            // 托盘图标没加上时不能把任务栏也关掉 —— 那样就再没有能点到它的入口了
+            if (TaskbarVisible && !_trayAdded)
+            {
+                MessageBox.Show("托盘图标当前不可用，任务栏按钮是唯一的入口，先别关。\n可以先点「重新添加托盘图标」重试一次。",
+                                "硬件监测", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            _settings.ShowInTaskbar = !TaskbarVisible;
+            _taskbarFallback = false;
+            try { ShowInTaskbar = _settings.ShowInTaskbar; } catch { }
+            RefreshChrome();
+            _settings.Save();
+            LogLine("taskbar=" + (_settings.ShowInTaskbar ? "on" : "off"));
+        }
+
         void ActShortcut()
         {
             string msg;
@@ -3151,6 +3211,7 @@ namespace HardwareHud
                 case 3: ActResetPosition(); return true;
                 case 4: ActShortcut(); return true;
                 case 5: ActExit(); return true;
+                case 6: ActTaskbar(); return true;
             }
             return false;
         }
@@ -3190,6 +3251,7 @@ namespace HardwareHud
                 AppendSysItem(h, 3, "回到右上角", false);
                 AppendSysItem(h, 4, "桌面快捷方式", false);
                 AppendSysItem(h, 5, "退出", false);
+                AppendSysItem(h, 6, "在任务栏显示", TaskbarVisible);
                 _sysMenuStatus = "ok";
             }
             catch (Exception ex)
