@@ -147,6 +147,48 @@ namespace HardwareHud
             catch { }
         }
 
+        // ── 隐藏模式要判断「鼠标是不是停在托盘图标上」──
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT
+        {
+            public int X, Y;
+        }
+
+        [DllImport("user32.dll")]
+        public static extern bool GetCursorPos(out POINT pt);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct NOTIFYICONIDENTIFIER
+        {
+            public uint cbSize;
+            public IntPtr hWnd;
+            public uint uID;
+            public Guid guidItem;
+        }
+
+        [DllImport("shell32.dll", EntryPoint = "Shell_NotifyIconGetRect")]
+        static extern int ShellNotifyIconGetRect(ref NOTIFYICONIDENTIFIER identifier, out RECT iconLocation);
+
+        // 取托盘图标当前所在的屏幕矩形。这个导出是 Win7 才加的，更老的系统上会抛
+        // EntryPointNotFoundException（还可能被安全软件拦），所以一律吞异常，
+        // 调用方按「拿不到位置」处理：拿不到就退回用鼠标位置判断，不因为是新 API 就崩。
+        public static bool TryGetTrayRect(IntPtr hwnd, uint id, out RECT rect)
+        {
+            rect = new RECT();
+            if (hwnd == IntPtr.Zero) return false;
+            try
+            {
+                NOTIFYICONIDENTIFIER nid = new NOTIFYICONIDENTIFIER();
+                nid.cbSize = (uint)Marshal.SizeOf(typeof(NOTIFYICONIDENTIFIER));
+                nid.hWnd = hwnd;
+                nid.uID = id;
+                nid.guidItem = Guid.Empty;
+                if (ShellNotifyIconGetRect(ref nid, out rect) != 0) return false;
+                return rect.Right > rect.Left && rect.Bottom > rect.Top;
+            }
+            catch { return false; }
+        }
+
         // ── 通知区域（托盘）图标 ──
         public const uint NIM_ADD = 0;
         public const uint NIM_MODIFY = 1;
@@ -1369,6 +1411,7 @@ namespace HardwareHud
         public int Y = -999999;
         public bool Autostart;
         public bool Minimal;                    // 极简模式：只显示文字，不画面板和曲线
+        public bool Peek;                       // 隐藏模式：平时什么都不显示，鼠标停在托盘图标上才露一行
         public bool ShowInTaskbar;              // 任务栏按钮；默认关，只留托盘图标
 
         // 配置目录：优先 %APPDATA%，不可写时依次退到 %LOCALAPPDATA%、exe 同目录。
@@ -1463,6 +1506,7 @@ namespace HardwareHud
                             if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n)) s.Y = n;
                         }
                         else if (k == "minimal") s.Minimal = v == "1";
+                        else if (k == "peek") s.Peek = v == "1";
                         else if (k == "taskbar") s.ShowInTaskbar = v == "1";
                     }
                 }
@@ -1482,6 +1526,7 @@ namespace HardwareHud
                 "x=" + X.ToString(CultureInfo.InvariantCulture),
                 "y=" + Y.ToString(CultureInfo.InvariantCulture),
                 "minimal=" + (Minimal ? "1" : "0"),
+                "peek=" + (Peek ? "1" : "0"),
                 "taskbar=" + (ShowInTaskbar ? "1" : "0")
             };
             if (TryWrite(FilePath, lines)) return;
@@ -1658,6 +1703,17 @@ namespace HardwareHud
         const double MinValueSize = 14;
         public bool Minimal;
 
+        // ── 隐藏模式（悬停托盘才出现）：一行三格，比极简模式还紧凑 ──
+        // 三列用固定的右边界、数值右对齐：百分比从 9% 跳到 100% 时窗口不会跟着变宽，
+        // 悬停出来的那一小块也就不会左右抖。
+        public const double PeekW = 232;
+        public const double PeekH = 26;
+        const double PeekCellW = 66;
+        const double PeekLabelSize = 9.5;
+        const double PeekValueSize = 13;
+        public bool Peek;
+        static readonly double[] PeekCellRight = new double[] { 78, 150, 222 };
+
         public double MinimalHeight { get { return MinPadY * 2 + _rows.Count * MinRowH; } }
 
         public int RowCount { get { return _rows.Count; } }
@@ -1764,6 +1820,35 @@ namespace HardwareHud
             try
             {
                 StringBuilder sb = new StringBuilder();
+
+                if (Peek)
+                {
+                    sb.AppendLine("MODE=peek canvas=" + F(PeekW) + "x" + F(PeekH) +
+                                  " cellW=" + F(PeekCellW) + " cols=" + PeekCellRight.Length);
+                    Row[] cells = PeekRows();
+                    double cy = PeekH / 2;
+                    for (int i = 0; i < cells.Length; i++)
+                    {
+                        Row r = cells[i];
+                        string labelText = r == null ? "-" : MinLabel(r);
+                        string valueText = r == null ? "-" : PeekValue(r);
+                        FormattedText lb = Text(labelText, PeekLabelSize, FontWeights.Normal, Look.InkMid);
+                        FormattedText vl = Text(valueText, PeekValueSize, FontWeights.SemiBold, Look.Ink);
+                        double right = PeekCellRight[i];
+                        double left = right - PeekCellW;
+                        double valueLeft = right - vl.WidthIncludingTrailingWhitespace;
+                        double labelTop = cy - lb.Height / 2;
+                        double valueTop = cy - vl.Height / 2;
+                        sb.AppendLine("cell[" + i + "] label=\"" + labelText + "\" value=\"" + valueText + "\"");
+                        sb.AppendLine("   label x=" + F(left) + " y=" + F(labelTop) + " w=" + F(lb.WidthIncludingTrailingWhitespace) + " h=" + F(lb.Height));
+                        sb.AppendLine("   value x=" + F(valueLeft) + " y=" + F(valueTop) + " w=" + F(vl.WidthIncludingTrailingWhitespace) + " h=" + F(vl.Height));
+                        sb.AppendLine("   CHECK label/value overlap = " + ((left + lb.WidthIncludingTrailingWhitespace > valueLeft) ? "YES <-- BAD" : "no"));
+                        sb.AppendLine("   CHECK value right vs canvas(" + F(PeekW) + ") = " + (right > PeekW ? "OVERFLOW <-- BAD" : "ok"));
+                        sb.AppendLine("   CHECK cell in canvas = " + ((left < 0 || valueTop + vl.Height > PeekH) ? "OVERFLOW <-- BAD" : "ok"));
+                    }
+                    File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
+                    return;
+                }
 
                 if (Minimal)
                 {
@@ -1946,6 +2031,12 @@ namespace HardwareHud
         {
             _dpi = Screen.Scale(this);
 
+            if (Peek)
+            {
+                DrawPeek(dc);
+                return;
+            }
+
             if (Minimal)
             {
                 DrawMinimal(dc);
@@ -2026,6 +2117,64 @@ namespace HardwareHud
                 DrawOutline(dc, valueText, MinValueSize, FontWeights.Bold, valueLeft, valueTop);
                 dc.DrawText(value, new Point(valueLeft, valueTop));
             }
+        }
+
+        // ── 隐藏模式：一行三格 ──
+        // 只画 CPU / 第一块显卡 / 内存三个值，连温度都不带 —— 悬停瞄一眼就够，
+        // 多了反而挡桌面。描边沿用极简模式那套，压在什么壁纸上都看得清。
+        void DrawPeek(DrawingContext dc)
+        {
+            Row[] cells = PeekRows();
+            double cy = PeekH / 2;
+            for (int i = 0; i < cells.Length; i++)
+            {
+                Row r = cells[i];
+                if (r == null) continue;
+
+                double right = PeekCellRight[i];
+                double left = right - PeekCellW;
+
+                double v = RowValue(r);
+                bool hot = !double.IsNaN(v) && !double.IsInfinity(v) && v >= 90;
+
+                string labelText = MinLabel(r);
+                string valueText = PeekValue(r);
+
+                FormattedText label = Text(labelText, PeekLabelSize, FontWeights.Normal, MinLabelColor);
+                FormattedText value = Text(valueText, PeekValueSize, FontWeights.Bold, hot ? Look.Alert : Look.Ink);
+
+                double labelTop = cy - label.Height / 2;
+                double valueLeft = right - value.WidthIncludingTrailingWhitespace;
+                double valueTop = cy - value.Height / 2;
+
+                DrawOutline(dc, labelText, PeekLabelSize, FontWeights.Normal, left, labelTop);
+                dc.DrawText(label, new Point(left, labelTop));
+                DrawOutline(dc, valueText, PeekValueSize, FontWeights.Bold, valueLeft, valueTop);
+                dc.DrawText(value, new Point(valueLeft, valueTop));
+            }
+        }
+
+        // 三格固定取 CPU / 第一块显卡 / 内存；多卡机器上后面的卡跳过，不挤进来
+        Row[] PeekRows()
+        {
+            Row cpu = null, gpu = null, ram = null;
+            for (int i = 0; i < _rows.Count; i++)
+            {
+                Row r = _rows[i];
+                if (r == null) continue;
+                if (cpu == null && !r.IsGpu && r.Pen == "cpu") cpu = r;
+                else if (gpu == null && r.IsGpu) gpu = r;
+                else if (ram == null && !r.IsGpu && r.Pen == "ram") ram = r;
+            }
+            return new Row[] { cpu, gpu, ram };
+        }
+
+        // 隐藏模式的值只要百分比，不带温度：列宽固定，悬停出来的那块就不会跳
+        string PeekValue(Row r)
+        {
+            double v = RowValue(r);
+            if (double.IsNaN(v) || double.IsInfinity(v)) return "--";
+            return Math.Round(v).ToString("0", CultureInfo.InvariantCulture) + "%";
         }
 
         void DrawOutline(DrawingContext dc, string s, double size, FontWeight weight, double x, double y)
@@ -2399,10 +2548,14 @@ namespace HardwareHud
         string _hotkeyStatus = "none";
         string _sysMenuStatus = "none";
         DispatcherTimer _trayRetry;
+        DispatcherTimer _peekTimer;      // 隐藏模式下轮询"鼠标还在不在托盘图标上"
+        bool _peekVisible;
+        bool _peekNoRect;
         int _trayTries;
         EventWaitHandle _wake;
         bool _startLogged;
         bool _taskbarFallback;   // 本次运行因托盘失败临时打开任务栏按钮
+        public bool NoSave;      // 开发开关（--peek 等）拉起时不写设置
 
         // 第二个实例启动时用它叫醒已经在跑的那个
         public const string WakeEventName = @"Local\HardwareHud.Wake";
@@ -2443,6 +2596,8 @@ namespace HardwareHud
 
             _canvas = new HudCanvas();
             _canvas.Minimal = minimal;
+            // 隐藏模式是极简之上的又一层：布局仍然用文字，平时整块藏起来，只在悬停托盘时露一下
+            _canvas.Peek = _settings.Peek;
             _canvas.ResetRequested = ApplySize;
 
             LinearGradientBrush bg = new LinearGradientBrush(Look.SlabTop, Look.SlabBottom,
@@ -2501,6 +2656,20 @@ namespace HardwareHud
 
         void ApplySize()
         {
+            if (_canvas.Peek)
+            {
+                // 隐藏模式：窗口缩到一行，平时不可见（见 UpdatePeekVisibility）
+                _slab.Visibility = Visibility.Collapsed;
+                _host.Padding = new Thickness(0);
+
+                Width = HudCanvas.PeekW;
+                Height = HudCanvas.PeekH;
+                _canvas.Width = HudCanvas.PeekW;
+                _canvas.Height = HudCanvas.PeekH;
+                RefreshChrome();
+                return;
+            }
+
             if (_canvas.Minimal)
             {
                 // 极简模式：面板整体不参与布局，窗口缩到文字块大小
@@ -2534,19 +2703,155 @@ namespace HardwareHud
         // 切换极简模式（右键菜单和 --toggle 共用同一段逻辑）
         public void ToggleMinimal()
         {
+            if (_canvas.Peek)
+            {
+                // 从隐藏模式回到极简模式：至少要在屏幕上看得见
+                _canvas.Peek = false;
+                _settings.Peek = false;
+                _canvas.Minimal = true;
+                _settings.Minimal = true;
+                ApplyModeChange();
+                return;
+            }
+
             bool next = !_canvas.Minimal;
             _canvas.Minimal = next;
             _settings.Minimal = next;
+            ApplyModeChange();
+        }
 
-            // 宽度从 400 缩到 158 时以右边缘为锚，否则会从右上角"跳走"
+        // 隐藏模式开关：屏幕上什么都不显示，只有鼠标停在托盘图标上才露一行
+        public void SetPeek(bool on)
+        {
+            if (_canvas.Peek == on) return;
+            _canvas.Peek = on;
+            _settings.Peek = on;
+            if (on)
+            {
+                _canvas.Minimal = true;
+                _settings.Minimal = true;
+            }
+            ApplyModeChange();
+        }
+
+        void ApplyModeChange()
+        {
+            // 宽度在 400 / 164 / 232 之间换的时候以右边缘为锚，否则会从右上角"跳走"
             double rightEdge = Left + Width;
             ApplySize();
             Left = rightEdge - Width;
             KeepOnScreen();
 
-            _settings.Save();
+            UpdatePeekTimer();
+            UpdatePeekVisibility();
+
+            // 命令行强制某个模式时（--minimal / --peek ），不要把这次的选择写回配置
+            if (!NoSave) _settings.Save();
             _canvas.InvalidateVisual();
             BuildSystemMenu();
+        }
+
+        // ── 隐藏模式：轮询鼠标是不是还停在托盘图标上 ──
+        void UpdatePeekTimer()
+        {
+            if (_canvas.Peek && _trayAdded)
+            {
+                if (_peekTimer == null)
+                {
+                    _peekTimer = new DispatcherTimer();
+                    _peekTimer.Interval = TimeSpan.FromMilliseconds(150);
+                    _peekTimer.Tick += delegate { PollPeek(); };
+                }
+                _peekTimer.Start();
+                LogLine("peek: timer on");
+            }
+            else if (_peekTimer != null)
+            {
+                _peekTimer.Stop();
+                _peekTimer = null;
+            }
+        }
+
+        void PollPeek()
+        {
+            if (!_canvas.Peek)
+            {
+                HidePeek();
+                return;
+            }
+
+            Native.POINT pt;
+            if (!Native.GetCursorPos(out pt))
+            {
+                HidePeek();
+                return;
+            }
+
+            Native.RECT icon;
+            if (!Native.TryGetTrayRect(_hwnd, 1, out icon))
+            {
+                // 取不到图标矩形（老系统上没有这个 API、或被安全软件拦）时没有可靠位置，
+                // 就不硬撑着弹：托盘提示里本来就有三个数，不会完全看不到信息
+                if (!_peekNoRect)
+                {
+                    _peekNoRect = true;
+                    LogLine("peek: no rect");
+                }
+                HidePeek();
+                return;
+            }
+            _peekNoRect = false;
+
+            const int slack = 4;      // 图标四周多给 4px，边缘也还算"停在上面"
+            bool over = pt.X >= icon.Left - slack && pt.X <= icon.Right + slack &&
+                        pt.Y >= icon.Top - slack && pt.Y <= icon.Bottom + slack;
+            if (over) ShowPeekAt(icon);
+            else HidePeek();
+        }
+
+        void ShowPeekAt(Native.RECT icon)
+        {
+            // 图标矩形是物理像素，窗口位置是 DIP；跨显示器时缩放不同，
+            // 用当前窗口所在屏的缩放换算，下一轮轮询会按新屏再校一次，两轮内稳定
+            double scale = Screen.Scale(this);
+            if (scale <= 0.1 || scale > 10) scale = 1.0;
+
+            double w = Width, h = Height;
+            double left = icon.Right / scale - w;
+            double top = icon.Top / scale - h - 6;
+
+            if (Math.Abs(Left - left) > 1.5 || Math.Abs(Top - top) > 1.5)
+            {
+                Left = left;
+                Top = top;
+                KeepOnScreen();
+            }
+
+            if (!_peekVisible)
+            {
+                _peekVisible = true;
+                try { Visibility = Visibility.Visible; } catch { }
+            }
+        }
+
+        void HidePeek()
+        {
+            if (!_peekVisible) return;
+            _peekVisible = false;
+            try { Visibility = Visibility.Hidden; } catch { }
+        }
+
+        void UpdatePeekVisibility()
+        {
+            if (!_canvas.Peek)
+            {
+                // 退出隐藏模式：立刻放回屏幕上，别让用户以为它没了
+                _peekVisible = true;
+                try { Visibility = Visibility.Visible; } catch { }
+                return;
+            }
+            _peekVisible = false;
+            try { Visibility = Visibility.Hidden; } catch { }
         }
 
         // ── 开发用：把面板本身渲染成 PNG（不经过屏幕抓取，尺寸精确）──
@@ -2555,8 +2860,12 @@ namespace HardwareHud
             try
             {
                 _canvas.UpdateLayout();
-                int w = (int)Math.Ceiling(_canvas.ActualWidth > 0 ? _canvas.ActualWidth : HudCanvas.W);
-                int h = (int)Math.Ceiling(_canvas.ActualHeight > 0 ? _canvas.ActualHeight : _canvas.SlabHeight);
+                // 隐藏模式下窗口是 Visibility.Hidden，布局不一定跑过，ActualWidth 会是 0，
+                // 这时按布局常量兜底，快照尺寸才准
+                double fallbackW = _canvas.Peek ? HudCanvas.PeekW : HudCanvas.W;
+                double fallbackH = _canvas.Peek ? HudCanvas.PeekH : _canvas.SlabHeight;
+                int w = (int)Math.Ceiling(_canvas.ActualWidth > 0 ? _canvas.ActualWidth : fallbackW);
+                int h = (int)Math.Ceiling(_canvas.ActualHeight > 0 ? _canvas.ActualHeight : fallbackH);
 
                 RenderTargetBitmap rtb = new RenderTargetBitmap(
                     (int)Math.Ceiling(w * scale), (int)Math.Ceiling(h * scale),
@@ -2567,7 +2876,7 @@ namespace HardwareHud
                 DrawingVisual dv = new DrawingVisual();
                 using (DrawingContext dc = dv.RenderOpen())
                 {
-                    if (_canvas.Minimal)
+                    if (_canvas.Minimal || _canvas.Peek)
                     {
                         dc.DrawRectangle(Look.Brush(Color.FromRgb(0x3A, 0x3A, 0x3A)), null, new Rect(0, 0, w, h));
                     }
@@ -2605,8 +2914,8 @@ namespace HardwareHud
             try
             {
                 StringBuilder sb = new StringBuilder();
-                sb.AppendLine("canvasW=" + _canvas.ActualWidth.ToString("0.##", CultureInfo.InvariantCulture));
-                sb.AppendLine("canvasH=" + _canvas.ActualHeight.ToString("0.##", CultureInfo.InvariantCulture));
+                sb.AppendLine("canvasW=" + (_canvas.ActualWidth > 0 ? _canvas.ActualWidth : (_canvas.Peek ? HudCanvas.PeekW : HudCanvas.W)).ToString("0.##", CultureInfo.InvariantCulture));
+                sb.AppendLine("canvasH=" + (_canvas.ActualHeight > 0 ? _canvas.ActualHeight : (_canvas.Peek ? HudCanvas.PeekH : _canvas.SlabHeight)).ToString("0.##", CultureInfo.InvariantCulture));
                 sb.AppendLine("slabH=" + _canvas.SlabHeight.ToString("0.##", CultureInfo.InvariantCulture));
                 sb.AppendLine("window=" + Left.ToString("0.##", CultureInfo.InvariantCulture) + "," +
                               Top.ToString("0.##", CultureInfo.InvariantCulture) + " " +
@@ -2619,6 +2928,7 @@ namespace HardwareHud
                 sb.AppendLine("hotkey=" + _hotkeyStatus);
                 sb.AppendLine("sysmenu=" + _sysMenuStatus);
                 sb.AppendLine("taskbar=" + (ShowInTaskbar ? "on" : "off"));
+                sb.AppendLine("peek=" + (_canvas.Peek ? "on" : "off"));
                 sb.AppendLine("tip=" + _canvas.TrayText());
                 File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
             }
@@ -2654,6 +2964,10 @@ namespace HardwareHud
 
             // 样式必须放在最后：WPF 在布局/显示过程中会重写窗口样式，早设会被覆盖
             RefreshChrome();
+
+            // 隐藏模式：起来就先藏起来，之后只由「鼠标停在托盘图标上」把它叫出来
+            UpdatePeekTimer();
+            UpdatePeekVisibility();
 
             ListenForSecondInstance();
             // start 那一行挪到第一帧数据之后（见 OnSample）：那时 pdh= / gpu= 才是真实状态
@@ -2698,6 +3012,7 @@ namespace HardwareHud
                    " sysmenu=" + _sysMenuStatus +
                    " taskbar=" + (ShowInTaskbar ? "on" : "off") +
                    " minimal=" + (_canvas != null && _canvas.Minimal ? "1" : "0") +
+                   " peek=" + (_canvas != null && _canvas.Peek ? "1" : "0") +
                    " pdh=" + (_sampler != null ? _sampler.PdhStatus : "?") +
                    " gpu=" + (Nvml.Available ? Nvml.Count.ToString(CultureInfo.InvariantCulture) : "none") +
                    " pos=" + ((int)Left).ToString(CultureInfo.InvariantCulture) + "," + ((int)Top).ToString(CultureInfo.InvariantCulture) +
@@ -2838,6 +3153,13 @@ namespace HardwareHud
         // 这是本次运行的兜底，不写进设置 —— 下次启动仍按用户的选择只留托盘。
         void FallBackToTaskbar(string why)
         {
+            // 隐藏模式完全依赖托盘图标：图标都没有了，窗口藏起来就再也点不到了，
+            // 所以这种时候连带把隐藏模式关掉（同样不写进设置）
+            if (_canvas.Peek)
+            {
+                SetPeek(false);
+                LogLine("peek=off (fallback: " + why + ")");
+            }
             if (TaskbarVisible) return;
             _taskbarFallback = true;
             try { ShowInTaskbar = true; } catch { }
@@ -2962,7 +3284,7 @@ namespace HardwareHud
             if (msg == WM_SYSCOMMAND)
             {
                 int cmd = wParam.ToInt32() & 0xFFF0;
-                if (cmd >= MENU_BASE && cmd <= MENU_BASE + 6 * MENU_STEP)
+                if (cmd >= MENU_BASE && cmd <= MENU_BASE + 7 * MENU_STEP)
                 {
                     if (RunMenuCommand((cmd - MENU_BASE) / MENU_STEP))
                     {
@@ -3083,7 +3405,8 @@ namespace HardwareHud
             AddMenuRow(stack, "不透明度 " + OpacityPercent(), false, ActOpacity);
             AddMenuRow(stack, "开机自启动", _settings.Autostart, ActAutostart);
             AddMenuRow(stack, "回到右上角", false, ActResetPosition);
-            AddMenuRow(stack, "极简模式", _canvas.Minimal, ActMinimal);
+            AddMenuRow(stack, "极简模式", _canvas.Minimal && !_canvas.Peek, ActMinimal);
+            AddMenuRow(stack, "隐藏模式（悬停托盘显示）", _canvas.Peek, ActPeek);
             AddMenuRow(stack, "在任务栏显示", TaskbarVisible, ActTaskbar);
             // 托盘图标没加上时，多给一行手动补救的入口（正常情况不显示，避免菜单变长）
             if (!_trayAdded) AddMenuRow(stack, "重新添加托盘图标", false, ActRetryTray);
@@ -3154,6 +3477,11 @@ namespace HardwareHud
             ToggleMinimal();
         }
 
+        void ActPeek()
+        {
+            SetPeek(!_canvas.Peek);
+        }
+
         // 任务栏按钮开关：关掉后窗口只在通知区域留图标，任务栏和 Alt+Tab 都不出现
         void ActTaskbar()
         {
@@ -3217,6 +3545,7 @@ namespace HardwareHud
                 case 4: ActShortcut(); return true;
                 case 5: ActExit(); return true;
                 case 6: ActTaskbar(); return true;
+                case 7: ActPeek(); return true;
             }
             return false;
         }
@@ -3250,13 +3579,14 @@ namespace HardwareHud
                 }
 
                 Native.AppendMenu(h, Native.MF_SEPARATOR, 0, null);
-                AppendSysItem(h, 0, "极简模式", _canvas.Minimal);
+                AppendSysItem(h, 0, "极简模式", _canvas.Minimal && !_canvas.Peek);
                 AppendSysItem(h, 1, "始终置顶", _settings.Topmost);
                 AppendSysItem(h, 2, "不透明度 " + OpacityPercent(), false);
                 AppendSysItem(h, 3, "回到右上角", false);
                 AppendSysItem(h, 4, "桌面快捷方式", false);
                 AppendSysItem(h, 5, "退出", false);
                 AppendSysItem(h, 6, "在任务栏显示", TaskbarVisible);
+                AppendSysItem(h, 7, "隐藏模式", _canvas.Peek);
                 _sysMenuStatus = "ok";
             }
             catch (Exception ex)
@@ -3457,6 +3787,7 @@ namespace HardwareHud
             int waitMs = 2500;
             bool makeShortcut = false;
             bool forceMinimal = false;
+            bool forcePeek = false;
             bool toggleMinimal = false;
             for (int i = 0; i < args.Length; i++)
             {
@@ -3467,6 +3798,7 @@ namespace HardwareHud
                 else if (a == "--wait" && i + 1 < args.Length) { int v; if (int.TryParse(args[++i], out v)) waitMs = v; }
                 else if (a == "--shortcut") makeShortcut = true;
                 else if (a == "--minimal") forceMinimal = true;
+                else if (a == "--peek") forcePeek = true;
                 else if (a == "--toggle") toggleMinimal = true;
                 else if (a == "--nogpu") Nvml.Disabled = true;   // 开发自检：模拟无 N 卡
             }
@@ -3551,7 +3883,8 @@ namespace HardwareHud
                 }
             };
 
-            HudWindow win = new HudWindow(settings, settings.Minimal || forceMinimal);
+            HudWindow win = new HudWindow(settings, settings.Minimal || forceMinimal || forcePeek);
+            if (forcePeek) { win.NoSave = true; win.SetPeek(true); }
             if (toggleMinimal) win.ToggleMinimal();
             win.Start();
 
