@@ -2,7 +2,7 @@
 
 一个常驻桌面的极小硬件仪表盘：CPU / GPU / 内存的使用率与历史曲线，外加 GPU 温度、功耗、频率、风扇，以及磁盘与网络的实时吞吐。
 
-纯 **.NET Framework 4.0+ + WPF**（开发与测试在 4.8 上进行），无任何第三方依赖、无需安装、单文件 exe（约 100 KB）。
+纯 **.NET Framework 4.0+ + WPF**（开发与测试在 4.8 上进行），无任何第三方依赖、无需安装、单文件 exe（约 107 KB，另有一个自包含的安装包方便升级）。
 
 可运行在 **Windows 7 SP1 / 8.1 / 10 / 11**：只用了 .NET Framework 4.0 就存在的 API，没有碰 `VisualTreeHelper.GetDpi`（4.6.2+）、`RuntimeInformation`（4.7.1+）、`AppContext`、`Task.Delay` 这类新 API；所有 P/Invoke 都按「缺 DLL 就退下一级」处理。
 
@@ -18,9 +18,13 @@
 
 ## 快速开始
 
-程序是**绿色单文件**，没有安装包、不写注册表服务、不需要管理员权限。
+两种用法，任选一种：
 
-1. 拿到 `HardwareHud.exe`：自己构建（见[从源码构建](#从源码构建)），或从 Releases 页面下载（如果发布了自己的构建）。
+**用安装包（推荐）** —— 从 Releases 下载 `HardwareHudSetup.exe`，双击 → 选安装位置（默认 `%LOCALAPPDATA%\Programs\HardwareHud`）→ 安装。装完会自动启动，桌面快捷方式和开机自启动一并建好，之后升级直接再跑一次新的安装包即可，设置和位置都不会丢。卸载走「设置 → 应用 → 硬件监测」，或安装目录里的 `uninstall.exe`。细节见[安装包与更新](#安装包与更新)。
+
+**绿色版** —— 程序本身是单文件，放进一个固定目录就能跑：
+
+1. 拿到 `HardwareHud.exe`：自己构建（见[从源码构建](#从源码构建)），或从 Releases 页面下载。
 2. 把它放到一个固定目录，推荐 `%LOCALAPPDATA%\Programs\HardwareHud\`：
 
    ```
@@ -62,6 +66,81 @@
 **找不到窗口时**：再双击一次桌面快捷方式就行 —— 第二个实例不会真的启动，而是把已经在跑的那个叫到最前面并直接弹出配置菜单。极简模式下窗口只有一小块文字，这是最省事的唤起方式。
 
 每次启动和退出都会在配置目录（通常是 `%APPDATA%\HardwareHud\`）写一行 `HardwareHud.log`，记录 exe 路径、构建时间、托盘 / 热键 / 系统菜单 / 任务栏的注册结果、窗口位置、`pdh=`（磁盘/网络计数器状态）和 `gpu=`（NVML 认到的卡数，`none` 表示走 DXGI + PDH 兜底）以及 `render tier=`（WPF 渲染层级）。采样线程、UI 线程、后台任务的意外异常也都落在这里（`sampler:` / `dispatcher-ex` / `unhandled` / `fatal` / `settings: fallback to`），不会再有「窗口突然消失、日志里什么都没有」的情况。超过 64 KB 自动清空。
+
+---
+
+## 安装包与更新
+
+`HardwareHudSetup.exe` 是一个自包含的安装器：程序本体和图标都嵌在里面，**不需要管理员权限**，所有东西都写在你自己的用户目录下。
+
+安装时它会做这几件事，任何一步失败都只记录、不中断安装：
+
+| 步骤 | 做了什么 |
+| --- | --- |
+| 关闭旧实例 | 结束正在运行的 `HardwareHud.exe`，避免覆盖时文件被占用 |
+| 释放文件 | 把 `HardwareHud.exe` 和 `HardwareHud.ico` 写进安装目录（默认 `%LOCALAPPDATA%\Programs\HardwareHud`） |
+| 桌面快捷方式 | 建 `硬件监测.lnk` |
+| 开机自启动 | 在「启动」文件夹建 `HardwareHud.lnk`（`/update` 时保持原样不动） |
+| 卸载登记 | 在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\HardwareHud` 写入「应用和功能」里能看到的那一条，并把自己的副本存成 `uninstall.exe` |
+| 启动程序 | 装完直接拉起（`/nolaunch` 可关掉） |
+
+命令行：
+
+```
+HardwareHudSetup.exe                          交互安装
+HardwareHudSetup.exe /S                       静默安装（不弹窗）
+HardwareHudSetup.exe /dir:"D:\Tools\Hud"      指定安装位置
+HardwareHudSetup.exe /update                  覆盖升级：只换 exe 和图标，快捷方式与卸载信息保持不动
+HardwareHudSetup.exe /S /nolaunch             装完不启动，适合批量部署
+HardwareHudSetup.exe /uninstall               卸载（配 /S 静默，配 /purge 连设置和日志一起删）
+```
+
+**升级**：下载新版 `HardwareHudSetup.exe` 再跑一遍就行 —— 安装器会先关掉旧实例，再原地替换，`settings.ini`、窗口位置和模式都保留。也可以用程序菜单里的「检查更新」跳到下载页。
+
+**卸载**：`设置 → 应用 → 安装的应用 → 硬件监测`，或安装目录里的 `uninstall.exe`。默认保留 `%APPDATA%\HardwareHud\` 里的设置和日志；带 `/purge` 才一起删。卸载器如果是从安装目录里运行的，会先把自己复制到 `%TEMP%` 再删目录，所以不会留下删不掉的自己。
+
+### 更新提醒
+
+程序启动后会在后台查一次版本（24 小时内不重复查，快照自检不联网），有新版时：
+
+- 右键菜单里那一行变成 **「有新版本 1.4.0 · 点击更新」**，点一下打开下载页；
+- 托盘弹一次气泡提示（每次运行最多一次）；
+- 没新版时菜单显示「检查更新」，手动点会告诉你「当前已是最新版本」。
+
+版本清单就是这个仓库根目录的 `update.json`，格式很小：
+
+```json
+{
+  "version": "1.4.0",
+  "url": "https://github.com/xiaodust/hardware-hud/releases/latest",
+  "notes": "新增：安装包；修复：隐藏模式菜单被遮挡"
+}
+```
+
+读取的是 `https://raw.githubusercontent.com/xiaodust/hardware-hud/main/update.json`。仓库放在别处、或者想用自己的镜像，改 `settings.ini` 里的一行即可：
+
+```ini
+updateurl=https://example.com/hud/update.json
+update=0        # 设成 0 就完全不联网检查
+```
+
+请求是普通的 HTTPS GET（只带 `HardwareHud/<版本>` 的 User-Agent），没有任何遥测，失败就静默跳过 —— 更新检查永远不会影响程序本身的启动。
+
+### 发布新版本
+
+1. 改 `src/HardwareHud.cs` 顶部的版本号（只有这一处，安装包和「关于」都读它）：
+
+   ```csharp
+   [assembly: AssemblyVersion("1.4.0.0")]
+   [assembly: AssemblyFileVersion("1.4.0.0")]
+   [assembly: AssemblyInformationalVersion("1.4.0")]
+   ```
+
+2. `build.bat all` —— 同时产出 `dist\HardwareHud.exe` 和 `dist\HardwareHudSetup.exe`。
+3. 把 `HardwareHudSetup.exe` 传到 GitHub Releases（tag 用 `v1.4.0`）。
+4. 改仓库根的 `update.json` 的 `version` / `notes`，推到 `main`。
+
+老版本下一次启动（或用户手动点「检查更新」）就会看到提示。`update.json` 里写成发布页地址即可，不需要直链 exe。
 
 ---
 
@@ -222,11 +301,13 @@ CPU 22%   GPU 30%   RAM 80%
 无需 Visual Studio、无需 .NET SDK，只用 Windows 自带的 .NET Framework 编译器：
 
 ```
-build.bat           只编译
+build.bat           只编译 app
+build.bat setup     编译 app + 生成安装包 dist\HardwareHudSetup.exe
 build.bat deploy    编译 + 覆盖安装目录
+build.bat all       以上全部
 ```
 
-输出 `dist\HardwareHud.exe`。脚本核心就是一条 `csc.exe` 命令：
+输出 `dist\HardwareHud.exe`（约 107 KB）。脚本核心就是一条 `csc.exe` 命令：
 
 ```
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
@@ -242,7 +323,7 @@ C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
 
 `build.bat deploy` 在编译后把新版本覆盖到安装目录（会先结束正在运行的实例；安装目录不存在时自动跳过），日常开发用这一条就行。编译前请退出从 `dist\` 启动的实例，否则 `csc` 会因为输出文件被占用而报 `CS0016`。
 
-唯一的源文件是 `src\HardwareHud.cs`（约 3600 行，C# 5 语法，因为自带的 csc 只支持到 C# 5）。
+唯一的源文件是 `src\HardwareHud.cs`（约 3600 行，C# 5 语法，因为自带的 csc 只支持到 C# 5）。安装包是第二个程序 `installer\Setup.cs`（WinForms，同样用 csc 编译），它把编好的 `HardwareHud.exe` 和图标**作为资源嵌进去**，所以 `dist\HardwareHudSetup.exe` 是自包含的，发给别人只需要这一个文件：
 
 ---
 
@@ -274,9 +355,11 @@ HardwareHud.exe --snapshot out.png --scale 2 --wait 5000
 
 ```
 hardware-hud/
-├─ src/HardwareHud.cs        唯一源文件（采集 / 视觉 / 窗口 / 菜单 / 托盘）
+├─ src/HardwareHud.cs        程序本体（采集 / 视觉 / 窗口 / 菜单 / 托盘 / 更新检查）
+├─ installer/Setup.cs        安装 / 卸载程序（把 HardwareHud.exe 作为资源嵌进安装包）
 ├─ assets/HardwareHud.ico    多尺寸图标（16…256，构建时嵌入 exe）
-├─ build.bat                 构建脚本：`build.bat` 只编译，`build.bat deploy` 编译并部署
+├─ build.bat                 构建脚本：`build.bat` / `setup` / `deploy` / `all`
+├─ update.json               版本清单，程序启动时读它判断有没有新版
 ├─ LICENSE                   MIT
 ├─ docs/                     README 用的截图：面板 400×397、极简 164×75、隐藏模式 232×26、托盘图标 364×72
 ├─ tools/
@@ -287,7 +370,7 @@ hardware-hud/
 
 `.build/` 里是一批开发期用的像素分析小工具（csc 独立编译、可整个删掉），**不随仓库分发**，仓库里看不到它们；上面的自检路径（`--snapshot` + `--geometry`）不依赖这些工具。
 
-安装：把快捷方式 `硬件监测` 指向**安装目录**里的 `HardwareHud.exe`（图标已嵌入 exe，快捷方式用 `,0`），或直接用菜单里的「桌面快捷方式」自动创建 —— 细节见[快速开始](#快速开始)。
+安装：双击 `dist\HardwareHudSetup.exe`（细节见[安装包与更新](#安装包与更新)），或把快捷方式 `硬件监测` 指向**安装目录**里的 `HardwareHud.exe`（图标已嵌入 exe，快捷方式用 `,0`），后者也可以直接用菜单里的「桌面快捷方式」自动创建。
 
 ---
 
@@ -301,6 +384,7 @@ hardware-hud/
 - **Windows 7 需要自行装 .NET Framework 4.x**（系统自带的只有 3.5）；Win7 上没有 `Bahnschrift` 字体，标题会自动退到 Microsoft YaHei UI / Segoe UI，排版不变。
 - 显卡功耗位在部分型号上显示 `功耗 N/A`：NVML 对该卡返回「不支持」，不是读取失败，其余指标正常。
 - 通知区域图标需要系统托盘可用；被组策略或受限桌面拒绝时，重试 20 次后会自动临时打开任务栏按钮，不会让你彻底找不到窗口。
+- 更新检查需要能访问 `raw.githubusercontent.com`；被墙或断网时静默跳过，不影响启动，也不会反复弹窗。安装器的快捷方式与卸载登记依赖桌面目录 / 启动项 / `HKCU` 可写，受限环境里会跳过并写进 `setup.log`。
 - `--snapshot` 等开关属于开发设施，保留在发布版本里但不影响正常使用。
 
 ---
@@ -331,8 +415,14 @@ Win7 自带只有 .NET Framework 3.5，需要自己装 4.x（4.0 即可）。装
 **能不能改采样间隔 / 曲线长度 / 换配色？**
 目前不开放配置，这三项写死在源码里（`Sampler` 的 500 ms、`History` 的 112 点、`Look` 里的颜色常量）。想改就改源码重建，`build.bat` 一条命令搞定。
 
+**怎么升级到新版本？**
+有安装包的话，下载新的 `HardwareHudSetup.exe` 再跑一遍，安装器会先关掉旧实例再原地替换，设置和位置都保留。绿色版就退出程序、用新 exe 覆盖旧的。程序启动时会自己检查一次更新（24 小时内不重复），菜单里也会显示「有新版本」或「检查更新」。
+
+**安装时提示「无法写入卸载登记项」／桌面快捷方式没建出来？**
+安装本身已经成功了，只是「应用和功能」里那条卸载信息或快捷方式没写进去 —— 常见原因是安全软件拦截、或者 %TEMP% / 桌面 / 注册表被策略限制。安装目录里的 `setup.log` 会写明是哪一步、什么错误；可以用菜单里的「桌面快捷方式」补建，卸载直接跑安装目录下的 `uninstall.exe` 也一样。
+
 **会不会上传数据、连网？**
-不会。程序没有任何网络请求，不收集遥测。唯一的外部交互是读本机性能计数器、DXGI/NVML 和注册表。
+只做一件事：启动后在后台 GET 一次 `update.json` 判断有没有新版（带 `HardwareHud/<版本>` 的 User-Agent，24 小时内不重复），没有任何遥测，也不会上传任何本机信息。不想要联网就把 `settings.ini` 里的 `update` 改成 `0`。其余全部是本地读取：性能计数器、DXGI/NVML、注册表。
 
 ---
 

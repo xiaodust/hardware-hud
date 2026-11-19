@@ -1,4 +1,4 @@
-// HardwareHud —— 桌面硬件实时监测悬浮窗
+﻿// HardwareHud —— 桌面硬件实时监测悬浮窗
 //   采集：CPU(GetSystemTimes) / 内存(GlobalMemoryStatusEx) / 磁盘·网络(PDH 英文计数器) / GPU(NVML 直连)
 //   界面：WPF 全自绘，无边框磨砂面板 + 走纸式实时曲线
 // 编译：build.bat（csc /target:winexe，C# 5 语法）
@@ -10,6 +10,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -25,6 +26,11 @@ using System.Windows.Media.Imaging;
 using System.Windows.Media.Effects;
 using System.Windows.Threading;
 using Microsoft.Win32;
+
+// 版本号只有这一处：安装包、关于框、更新检查都读它
+[assembly: AssemblyVersion("1.3.0.0")]
+[assembly: AssemblyFileVersion("1.3.0.0")]
+[assembly: AssemblyInformationalVersion("1.3.0")]
 
 namespace HardwareHud
 {
@@ -147,6 +153,20 @@ namespace HardwareHud
             catch { }
         }
 
+        // 隐藏模式那一行是纯读数的浮层：出现时不该抢焦点（抢焦点会把刚打开的
+        // 右键菜单关掉）。NOACTIVATE 让它无论如何都激活不了自己。
+        public static void SetNoActivate(IntPtr hwnd, bool on)
+        {
+            try
+            {
+                const int WS_EX_NOACTIVATE = 0x08000000;
+                int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+                ex = on ? (ex | WS_EX_NOACTIVATE) : (ex & ~WS_EX_NOACTIVATE);
+                SetWindowLong(hwnd, GWL_EXSTYLE, ex);
+            }
+            catch { }
+        }
+
         // ── 隐藏模式要判断「鼠标是不是停在托盘图标上」──
         [StructLayout(LayoutKind.Sequential)]
         public struct POINT
@@ -197,6 +217,8 @@ namespace HardwareHud
         public const uint NIF_MESSAGE = 0x01;
         public const uint NIF_ICON = 0x02;
         public const uint NIF_TIP = 0x04;
+        public const uint NIF_INFO = 0x10;      // 气泡提示
+        public const uint NIIF_INFO = 0x01;
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         public struct NOTIFYICONDATA
@@ -1413,6 +1435,10 @@ namespace HardwareHud
         public bool Minimal;                    // 极简模式：只显示文字，不画面板和曲线
         public bool Peek;                       // 隐藏模式：平时什么都不显示，鼠标停在托盘图标上才露一行
         public bool ShowInTaskbar;              // 任务栏按钮；默认关，只留托盘图标
+        public bool UpdateCheck = true;         // 启动时检查更新（每天最多一次）
+        public string UpdateUrl;                // 更新清单地址；空 = 用内置默认
+        public long LastCheck;                   // 上次检查时间（UTC ticks），用来做 24 小时节流
+        public string LatestVersion;            // 上次查到的新版本，启动时先显示出来
 
         // 配置目录：优先 %APPDATA%，不可写时依次退到 %LOCALAPPDATA%、exe 同目录。
         // 某些受管/受限用户配置下 ApplicationData 是不可写的，不能让设置整体失效。
@@ -1508,6 +1534,14 @@ namespace HardwareHud
                         else if (k == "minimal") s.Minimal = v == "1";
                         else if (k == "peek") s.Peek = v == "1";
                         else if (k == "taskbar") s.ShowInTaskbar = v == "1";
+                        else if (k == "update") s.UpdateCheck = v == "1";
+                        else if (k == "updateurl") s.UpdateUrl = v;
+                        else if (k == "lastcheck")
+                        {
+                            long n;
+                            if (long.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out n)) s.LastCheck = n;
+                        }
+                        else if (k == "latest") s.LatestVersion = v;
                     }
                 }
             }
@@ -1527,7 +1561,11 @@ namespace HardwareHud
                 "y=" + Y.ToString(CultureInfo.InvariantCulture),
                 "minimal=" + (Minimal ? "1" : "0"),
                 "peek=" + (Peek ? "1" : "0"),
-                "taskbar=" + (ShowInTaskbar ? "1" : "0")
+                "taskbar=" + (ShowInTaskbar ? "1" : "0"),
+                "update=" + (UpdateCheck ? "1" : "0"),
+                "updateurl=" + (UpdateUrl ?? ""),
+                "lastcheck=" + LastCheck.ToString(CultureInfo.InvariantCulture),
+                "latest=" + (LatestVersion ?? "")
             };
             if (TryWrite(FilePath, lines)) return;
 
@@ -2514,6 +2552,155 @@ namespace HardwareHud
         }
     }
 
+    // ═══════════════════════════ 版本与更新检查 ═══════════════════════════
+    // 做法参考主流小工具（TrafficMonitor 的 version.info、各种 latest.json）：
+    // 仓库里放一个 update.json，程序隔一段时间拉一次，比较版本号；只提示，不自动装。
+    // 私有仓库没法用 GitHub API（404），所以清单地址可以在 settings.ini 里用 updateurl= 覆盖。
+    internal static class Updater
+    {
+        // 默认清单地址（仓库公开后有效；私有仓库会 404，静默忽略）
+        public const string DefaultManifest =
+            "https://raw.githubusercontent.com/xiaodust/hardware-hud/main/update.json";
+
+        public sealed class Result
+        {
+            public bool Ok;
+            public string Version;
+            public string Url;
+            public string Notes;
+            public string Error;
+            public bool Newer;      // 清单版本比当前版本新
+        }
+
+        // 当前版本：读 exe 的程序集版本，避免和源码里的常量写两遍
+        public static string Current
+        {
+            get
+            {
+                try
+                {
+                    Version v = Assembly.GetExecutingAssembly().GetName().Version;
+                    if (v != null) return v.Major + "." + v.Minor + "." + v.Build;
+                }
+                catch { }
+                return "0.0.0";
+            }
+        }
+
+        // "1.10.2" 这种按段比，缺的段当 0：1.3 = 1.3.0，1.10 > 1.9
+        public static int Compare(string a, string b)
+        {
+            string[] x = (a ?? "").Split('.'), y = (b ?? "").Split('.');
+            int n = Math.Max(x.Length, y.Length);
+            for (int i = 0; i < n; i++)
+            {
+                int xi = i < x.Length ? ParsePart(x[i]) : 0;
+                int yi = i < y.Length ? ParsePart(y[i]) : 0;
+                if (xi != yi) return xi < yi ? -1 : 1;
+            }
+            return 0;
+        }
+
+        static int ParsePart(string s)
+        {
+            int v = 0, i = 0;
+            while (i < s.Length && s[i] >= '0' && s[i] <= '9') { v = v * 10 + (s[i] - '0'); i++; }
+            return v;
+        }
+
+        // 清单是手写的小 JSON，不引 JSON 库：只按 key 取第一个字符串值
+        static string Pick(string json, string key)
+        {
+            if (json == null) return null;
+            string pat = "\"" + key + "\"";
+            int at = json.IndexOf(pat, StringComparison.OrdinalIgnoreCase);
+            if (at < 0) return null;
+            int colon = json.IndexOf(':', at + pat.Length);
+            if (colon < 0) return null;
+            int i = colon + 1;
+            while (i < json.Length && (json[i] == ' ' || json[i] == '\t' || json[i] == '\r' || json[i] == '\n')) i++;
+            if (i >= json.Length || json[i] != '"') return null;
+            i++;
+            StringBuilder sb = new StringBuilder();
+            while (i < json.Length)
+            {
+                char c = json[i++];
+                if (c == '"') break;
+                if (c == '\\' && i < json.Length)
+                {
+                    char e = json[i++];
+                    if (e == 'n') sb.Append('\n');
+                    else if (e == 't') sb.Append('\t');
+                    else if (e == 'u' && i + 4 <= json.Length)
+                    {
+                        int code;
+                        if (int.TryParse(json.Substring(i, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out code))
+                            sb.Append((char)code);
+                        i += 4;
+                    }
+                    else sb.Append(e);
+                }
+                else sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
+        // 同步取清单（不要在主线程直接调，网络慢会卡界面）
+        public static Result Fetch(string url, int timeoutMs)
+        {
+            Result r = new Result();
+            try
+            {
+                // Win7 默认不启用 TLS 1.2，GitHub 会直接断连；这个数值在 4.0 上也安全
+                try { ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072; }
+                catch { }
+
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+                req.Timeout = timeoutMs;
+                req.ReadWriteTimeout = timeoutMs;
+                req.UserAgent = "HardwareHud/" + Current;
+                req.Method = "GET";
+                req.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
+
+                string body;
+                using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                using (Stream st = resp.GetResponseStream())
+                using (StreamReader sr = new StreamReader(st, Encoding.UTF8))
+                    body = sr.ReadToEnd();
+
+                r.Version = Pick(body, "version");
+                r.Url = Pick(body, "url");
+                r.Notes = Pick(body, "notes");
+                if (string.IsNullOrEmpty(r.Version))
+                {
+                    r.Error = "清单里没有 version 字段";
+                    return r;
+                }
+                r.Ok = true;
+                r.Newer = Compare(r.Version, Current) > 0;
+            }
+            catch (WebException we)
+            {
+                HttpWebResponse hr = we.Response as HttpWebResponse;
+                r.Error = hr != null
+                    ? "HTTP " + (int)hr.StatusCode
+                    : we.Status.ToString();
+            }
+            catch (Exception ex)
+            {
+                r.Error = ex.GetType().Name;
+            }
+            return r;
+        }
+
+        public static void OpenPage(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return;
+            try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+            catch { }
+        }
+    }
+
     // ═══════════════════════════ 窗口 ═══════════════════════════
     public sealed class HudWindow : Window
     {
@@ -2551,11 +2738,16 @@ namespace HardwareHud
         DispatcherTimer _peekTimer;      // 隐藏模式下轮询"鼠标还在不在托盘图标上"
         bool _peekVisible;
         bool _peekNoRect;
+        bool _menuOpen;                     // 菜单展开期间不弹隐藏模式那一行，否则会盖住菜单
         int _trayTries;
         EventWaitHandle _wake;
         bool _startLogged;
         bool _taskbarFallback;   // 本次运行因托盘失败临时打开任务栏按钮
         public bool NoSave;      // 开发开关（--peek 等）拉起时不写设置
+        string _newVersion;      // 查到的新版本号；null = 没有（或还没查过）
+        string _newVersionUrl;   // 对应的下载页
+        bool _updateBusy;
+        bool _updateNotified;    // 本次运行只弹一次气泡
 
         // 第二个实例启动时用它叫醒已经在跑的那个
         public const string WakeEventName = @"Local\HardwareHud.Wake";
@@ -2698,6 +2890,9 @@ namespace HardwareHud
         public void Start()
         {
             _sampler.Start();
+            // 更新检查放在后台线程，网络慢也不挡界面
+            try { Dispatcher.BeginInvoke((Action)StartUpdateCheck); }
+            catch { }
         }
 
         // 切换极简模式（右键菜单和 --toggle 共用同一段逻辑）
@@ -2748,6 +2943,8 @@ namespace HardwareHud
             // 命令行强制某个模式时（--minimal / --peek ），不要把这次的选择写回配置
             if (!NoSave) _settings.Save();
             _canvas.InvalidateVisual();
+            // 隐藏模式要额外打 NOACTIVATE，切换模式时同步一次扩展样式
+            if (_hwnd != IntPtr.Zero) Native.SetNoActivate(_hwnd, _canvas.Peek);
             BuildSystemMenu();
         }
 
@@ -2774,6 +2971,13 @@ namespace HardwareHud
 
         void PollPeek()
         {
+            if (_menuOpen)
+            {
+                // 菜单展开期间既不动窗口也不显示：鼠标往上移到菜单上是正常操作
+                if (_peekVisible) HidePeek();
+                return;
+            }
+
             if (!_canvas.Peek)
             {
                 HidePeek();
@@ -3007,6 +3211,7 @@ namespace HardwareHud
             catch { stamp = "?"; }
             return "exe=" + ExePath() +
                    " build=" + stamp +
+                   " ver=" + Updater.Current +
                    " tray=" + _trayStatus +
                    " hotkey=" + _hotkeyStatus +
                    " sysmenu=" + _sysMenuStatus +
@@ -3053,6 +3258,8 @@ namespace HardwareHud
             // 会把窗口重新加回任务栏与 Alt+Tab
             if (TaskbarVisible) Native.ForceAppWindow(_hwnd);
             else Native.ForceToolWindow(_hwnd);
+            // 隐藏模式下的窗口只在悬停时露一下，永远不该被激活
+            Native.SetNoActivate(_hwnd, _canvas != null && _canvas.Peek);
             Native.EnsureSystemMenu(_hwnd);
             BuildSystemMenu();
         }
@@ -3284,7 +3491,7 @@ namespace HardwareHud
             if (msg == WM_SYSCOMMAND)
             {
                 int cmd = wParam.ToInt32() & 0xFFF0;
-                if (cmd >= MENU_BASE && cmd <= MENU_BASE + 7 * MENU_STEP)
+                if (cmd >= MENU_BASE && cmd <= MENU_BASE + 8 * MENU_STEP)
                 {
                     if (RunMenuCommand((cmd - MENU_BASE) / MENU_STEP))
                     {
@@ -3411,6 +3618,10 @@ namespace HardwareHud
             // 托盘图标没加上时，多给一行手动补救的入口（正常情况不显示，避免菜单变长）
             if (!_trayAdded) AddMenuRow(stack, "重新添加托盘图标", false, ActRetryTray);
             AddMenuRow(stack, "桌面快捷方式", false, ActShortcut);
+            if (_newVersion != null)
+                AddMenuRow(stack, "有新版本 " + _newVersion + " · 点击更新", true, ActCheckUpdate);
+            else
+                AddMenuRow(stack, "检查更新", false, ActCheckUpdate);
             AddMenuRow(stack, "诊断信息", false, ActDiagnostics);
             AddMenuRow(stack, "退出", false, ActExit);
 
@@ -3438,6 +3649,11 @@ namespace HardwareHud
             _menu.Placement = PlacementMode.MousePoint;
             _menu.StaysOpen = false;
             _menu.Child = card;
+            // 菜单是"从托盘往上弹"的，正好和隐藏模式那一行抢同一块区域：
+            // 菜单开着的时候不许弹，否则既盖住菜单又抢走点击
+            _menu.Closed += delegate { _menuOpen = false; };
+            _menuOpen = true;
+            HidePeek();
             _menu.IsOpen = true;
         }
 
@@ -3534,6 +3750,117 @@ namespace HardwareHud
             MessageBox.Show(text, "硬件监测 · 诊断信息", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
+        // ── 更新检查：启动后自动查一次（24 小时内不重复），也可以手动点 ──
+        string ManifestUrl()
+        {
+            if (!string.IsNullOrEmpty(_settings.UpdateUrl)) return _settings.UpdateUrl;
+            return Updater.DefaultManifest;
+        }
+
+        public void StartUpdateCheck()
+        {
+            // 上次查到的新版本先显示出来，不必等这次网络返回
+            if (!string.IsNullOrEmpty(_settings.LatestVersion) &&
+                Updater.Compare(_settings.LatestVersion, Updater.Current) > 0)
+                _newVersion = _settings.LatestVersion;
+            CheckUpdate(false);
+        }
+
+        void CheckUpdate(bool manual)
+        {
+            if (_updateBusy) return;
+            if (!manual)
+            {
+                if (!_settings.UpdateCheck) return;
+                long last = _settings.LastCheck;
+                if (last > 0 && DateTime.UtcNow.Ticks - last < TimeSpan.TicksPerDay) return;
+            }
+
+            _updateBusy = true;
+            string url = ManifestUrl();
+            Task.Factory.StartNew(delegate
+            {
+                Updater.Result r = Updater.Fetch(url, 8000);
+                try { Dispatcher.BeginInvoke((Action)delegate { OnUpdateResult(r, manual); }); }
+                catch { }
+            });
+        }
+
+        void OnUpdateResult(Updater.Result r, bool manual)
+        {
+            _updateBusy = false;
+            _settings.LastCheck = DateTime.UtcNow.Ticks;
+
+            if (r.Ok && r.Newer)
+            {
+                _newVersion = r.Version;
+                _newVersionUrl = r.Url;
+                _settings.LatestVersion = r.Version;
+                if (!NoSave) _settings.Save();
+                LogLine("update: found v" + r.Version + " (current " + Updater.Current + ")");
+                BuildSystemMenu();
+                if (manual)
+                {
+                    if (AskOpenUpdate()) Updater.OpenPage(_newVersionUrl);
+                }
+                else NotifyUpdate();
+                return;
+            }
+
+            if (!NoSave) _settings.Save();
+            if (!manual) return;   // 自动检查没结果就安静着，别打扰
+
+            if (!r.Ok)
+                MessageBox.Show("检查更新失败：" + r.Error +
+                                "\n\n清单地址：" + ManifestUrl() +
+                                "\n（仓库未公开或网络不通时会这样，不影响正常使用）",
+                                "硬件监测", MessageBoxButton.OK, MessageBoxImage.Warning);
+            else
+                MessageBox.Show("当前已是最新版本 " + Updater.Current + "。",
+                                "硬件监测", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        bool AskOpenUpdate()
+        {
+            MessageBoxResult res = MessageBox.Show(
+                "发现新版本 " + _newVersion + "（当前 " + Updater.Current + "）。\n\n要打开下载页面吗？",
+                "硬件监测 · 检查更新", MessageBoxButton.YesNo, MessageBoxImage.Information);
+            return res == MessageBoxResult.Yes;
+        }
+
+        // 自动查到新版本：托盘气泡提示，不打断手上的操作（气泡被系统关掉也没关系，菜单里那一行还在）
+        void NotifyUpdate()
+        {
+            if (_updateNotified || _newVersion == null) return;
+            _updateNotified = true;
+            ShowBalloon("硬件监测", "发现新版本 " + _newVersion + "，右键菜单里可以更新");
+        }
+
+        void ShowBalloon(string title, string text)
+        {
+            if (!_trayAdded) return;
+            try
+            {
+                Native.NOTIFYICONDATA nid = NewTrayData();
+                nid.uFlags = Native.NIF_INFO;
+                nid.szInfoTitle = title;
+                nid.szInfo = text;
+                nid.dwInfoFlags = Native.NIIF_INFO;
+                Native.Shell_NotifyIcon(Native.NIM_MODIFY, ref nid);
+            }
+            catch { }
+        }
+
+        void ActCheckUpdate()
+        {
+            if (_newVersion != null)
+            {
+                if (AskOpenUpdate()) Updater.OpenPage(_newVersionUrl);
+                return;
+            }
+            CheckUpdate(true);
+        }
+
         bool RunMenuCommand(int index)
         {
             switch (index)
@@ -3546,6 +3873,7 @@ namespace HardwareHud
                 case 5: ActExit(); return true;
                 case 6: ActTaskbar(); return true;
                 case 7: ActPeek(); return true;
+                case 8: ActCheckUpdate(); return true;
             }
             return false;
         }
@@ -3587,6 +3915,7 @@ namespace HardwareHud
                 AppendSysItem(h, 5, "退出", false);
                 AppendSysItem(h, 6, "在任务栏显示", TaskbarVisible);
                 AppendSysItem(h, 7, "隐藏模式", _canvas.Peek);
+                AppendSysItem(h, 8, _newVersion != null ? "有新版本 " + _newVersion : "检查更新", false);
                 _sysMenuStatus = "ok";
             }
             catch (Exception ex)
@@ -3789,6 +4118,7 @@ namespace HardwareHud
             bool forceMinimal = false;
             bool forcePeek = false;
             bool toggleMinimal = false;
+            string updateProbe = null;
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i];
@@ -3801,6 +4131,30 @@ namespace HardwareHud
                 else if (a == "--peek") forcePeek = true;
                 else if (a == "--toggle") toggleMinimal = true;
                 else if (a == "--nogpu") Nvml.Disabled = true;   // 开发自检：模拟无 N 卡
+                // 开发自检：跑一次更新检查把结果写成文件（winexe 没有控制台），后面可跟清单地址
+                else if (a == "--updatecheck")
+                    updateProbe = (i + 1 < args.Length && !args[i + 1].StartsWith("--")) ? args[++i] : "";
+            }
+
+            if (updateProbe != null)
+            {
+                string url = string.IsNullOrEmpty(updateProbe) ? Updater.DefaultManifest : updateProbe;
+                Updater.Result r = Updater.Fetch(url, 8000);
+                string line = "url=" + url + "\r\nok=" + (r.Ok ? "1" : "0") +
+                              "\r\ncurrent=" + Updater.Current +
+                              "\r\nversion=" + (r.Version ?? "") +
+                              "\r\nnewer=" + (r.Newer ? "1" : "0") +
+                              "\r\nnotes=" + (r.Notes ?? "") +
+                              "\r\nurl2=" + (r.Url ?? "") +
+                              "\r\nerror=" + (r.Error ?? "") + "\r\n";
+                try
+                {
+                    string dir = Path.GetDirectoryName(HudWindow.ExePath());
+                    File.WriteAllText(Path.Combine(dir, "update-result.txt"), line, new UTF8Encoding(false));
+                }
+                catch { }
+                Environment.ExitCode = r.Ok ? 0 : 1;
+                return;
             }
 
             if (makeShortcut)
@@ -3863,6 +4217,8 @@ namespace HardwareHud
 
             Nvml.Init();
             Settings settings = Settings.Load();
+            // 快照是开发自检，别让它去联网查更新
+            if (shotPath != null) settings.UpdateCheck = false;
 
             // --minimal 只影响本次进程，不写回配置
             Application app = new Application();
