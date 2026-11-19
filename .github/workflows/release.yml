@@ -1,0 +1,40 @@
+name: release
+
+# 打 tag 就自动构建并发布，不用手动往 Releases 拖文件：
+#   git tag v1.3.1 && git push origin v1.3.1
+#
+# 跑在 GitHub 自带的 windows-latest 上，编译器用的是系统里的 .NET Framework 4.x，
+# 和本地 build.bat 完全同一条路径，不需要额外安装 SDK。
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app and installer
+        shell: cmd
+        run: build.bat setup
+
+      - name: Show artifacts
+        shell: cmd
+        run: dir dist
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/HardwareHudSetup.exe#Windows 安装包（推荐）" \
+            "dist/HardwareHud.exe#绿色版单文件" \
+            --title "HardwareHud ${GITHUB_REF_NAME}" \
+            --generate-notes

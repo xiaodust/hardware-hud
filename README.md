@@ -137,7 +137,17 @@ update=0        # 设成 0 就完全不联网检查
    ```
 
 2. `build.bat all` —— 同时产出 `dist\HardwareHud.exe` 和 `dist\HardwareHudSetup.exe`。
-3. 把 `HardwareHudSetup.exe` 传到 GitHub Releases（tag 用 `v1.4.0`）。
+3. 发布。两种方式，任选其一：
+   - **自动**（推荐）：推一个 tag，`.github/workflows/release.yml` 会在 GitHub 上编译并把安装包挂到 Release：
+
+     ```bash
+     git tag v1.4.0
+     git push origin v1.4.0
+     ```
+
+   - **手动**：把 `dist\HardwareHudSetup.exe` 传到 Releases，tag 用 `v1.4.0`。
+
+   注意 `dist\` 在 `.gitignore` 里，编译产物不进仓库——安装包只通过 Releases 分发。
 4. 改仓库根的 `update.json` 的 `version` / `notes`，推到 `main`。
 
 老版本下一次启动（或用户手动点「检查更新」）就会看到提示。`update.json` 里写成发布页地址即可，不需要直链 exe。
