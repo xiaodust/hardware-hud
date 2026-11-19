@@ -153,19 +153,10 @@ namespace HardwareHud
             catch { }
         }
 
-        // 隐藏模式那一行是纯读数的浮层：出现时不该抢焦点（抢焦点会把刚打开的
-        // 右键菜单关掉）。NOACTIVATE 让它无论如何都激活不了自己。
-        public static void SetNoActivate(IntPtr hwnd, bool on)
-        {
-            try
-            {
-                const int WS_EX_NOACTIVATE = 0x08000000;
-                int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
-                ex = on ? (ex | WS_EX_NOACTIVATE) : (ex & ~WS_EX_NOACTIVATE);
-                SetWindowLong(hwnd, GWL_EXSTYLE, ex);
-            }
-            catch { }
-        }
+        // 注：隐藏模式的窗口**不能**打成 WS_EX_NOACTIVATE。虽然那样能避免它抢焦点，
+        // 但 WPF 的 ContextMenu 需要一个可激活的宿主窗口：打成 NOACTIVATE 之后托盘
+        // 右键弹不出菜单，而且菜单弹出来后拿不到鼠标捕获，点桌面空白处也关不掉。
+        // 「弹出时不打断菜单」改用 ShowMenu/PollPeek 里的 _menuOpen 标记解决。
 
         // ── 隐藏模式要判断「鼠标是不是停在托盘图标上」──
         [StructLayout(LayoutKind.Sequential)]
@@ -2943,8 +2934,6 @@ namespace HardwareHud
             // 命令行强制某个模式时（--minimal / --peek ），不要把这次的选择写回配置
             if (!NoSave) _settings.Save();
             _canvas.InvalidateVisual();
-            // 隐藏模式要额外打 NOACTIVATE，切换模式时同步一次扩展样式
-            if (_hwnd != IntPtr.Zero) Native.SetNoActivate(_hwnd, _canvas.Peek);
             BuildSystemMenu();
         }
 
@@ -2973,8 +2962,8 @@ namespace HardwareHud
         {
             if (_menuOpen)
             {
-                // 菜单展开期间既不动窗口也不显示：鼠标往上移到菜单上是正常操作
-                if (_peekVisible) HidePeek();
+                // 菜单展开期间完全不动窗口：那一行正是 Popup 的锚点与捕获宿主，
+                // 把它收起来菜单要么弹不出来、要么点了别处也关不掉
                 return;
             }
 
@@ -3036,6 +3025,32 @@ namespace HardwareHud
                 _peekVisible = true;
                 try { Visibility = Visibility.Visible; } catch { }
             }
+        }
+
+        // 菜单要展开时，把一个"可见的宿主窗口"准备好；非隐藏模式下窗口本来就在
+        void ShowPeekForMenu()
+        {
+            if (!_canvas.Peek || _peekVisible) return;
+
+            Native.RECT icon;
+            if (Native.TryGetTrayRect(_hwnd, 1, out icon))
+            {
+                ShowPeekAt(icon);
+                return;
+            }
+
+            // 读不到图标矩形就贴着鼠标放，至少保证 Popup 有个可见的锚点
+            Native.POINT pt;
+            if (Native.GetCursorPos(out pt))
+            {
+                double scale = Screen.Scale(this);
+                if (scale <= 0.1 || scale > 10) scale = 1.0;
+                Left = pt.X / scale - Width / 2;
+                Top = pt.Y / scale - Height - 6;
+                KeepOnScreen();
+            }
+            _peekVisible = true;
+            try { Visibility = Visibility.Visible; } catch { }
         }
 
         void HidePeek()
@@ -3258,8 +3273,6 @@ namespace HardwareHud
             // 会把窗口重新加回任务栏与 Alt+Tab
             if (TaskbarVisible) Native.ForceAppWindow(_hwnd);
             else Native.ForceToolWindow(_hwnd);
-            // 隐藏模式下的窗口只在悬停时露一下，永远不该被激活
-            Native.SetNoActivate(_hwnd, _canvas != null && _canvas.Peek);
             Native.EnsureSystemMenu(_hwnd);
             BuildSystemMenu();
         }
@@ -3651,9 +3664,17 @@ namespace HardwareHud
             _menu.Child = card;
             // 菜单是"从托盘往上弹"的，正好和隐藏模式那一行抢同一块区域：
             // 菜单开着的时候不许弹，否则既盖住菜单又抢走点击
-            _menu.Closed += delegate { _menuOpen = false; };
+            _menu.Closed += delegate
+            {
+                _menuOpen = false;
+                // 菜单关掉，隐藏模式那一行跟着收回
+                if (_canvas.Peek) HidePeek();
+            };
             _menuOpen = true;
-            HidePeek();
+            // 隐藏模式下窗口平时是 Hidden 的，而 Popup 需要一个可见宿主窗口才能定位、
+            // 才能拿到鼠标捕获（否则右键弹不出来、弹出来点别处也关不掉）。
+            // 先把那一行按托盘位置露出来当锚点，菜单画在它上面，关掉再收回。
+            ShowPeekForMenu();
             _menu.IsOpen = true;
         }
 
